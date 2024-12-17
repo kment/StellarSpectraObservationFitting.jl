@@ -575,6 +575,9 @@ default_reg_tel = Dict([(:GP_μ, 1e6), (:L2_μ, 1e6), (:L1_μ, 1e5), (:L1_μ₊_
 	(:GP_M, 1e7), (:L1_M, 1e7)])
 default_reg_star = Dict([(:GP_μ, 1e2), (:L2_μ, 1e-2), (:L1_μ, 1e2), (:L1_μ₊_factor, 6.),
 	(:GP_M, 1e4), (:L1_M, 1e7)])
+default_reg_model = Dict([(:L2_μ, 1e4), (:L2_h2o, 1e4), (:L2_oxy, 1e4)])
+#default_reg_model = Dict([(:L2_μ, 1e4),])
+#default_reg_model = Dict([(:L2_h2o, 1e4), (:L2_oxy, 1e4)])
 default_reg_tel_full = Dict([(:GP_μ, 1e6), (:L2_μ, 1e6), (:L1_μ, 1e5),
 	(:L1_μ₊_factor, 6.), (:GP_M, 1e7), (:L2_M, 1e4), (:L1_M, 1e7)])
 default_reg_star_full = Dict([(:GP_μ, 1e2), (:L2_μ, 1e-2), (:L1_μ, 1e1),
@@ -668,6 +671,8 @@ struct OrderModelDPCA{T<:Number} <: OrderModel
 	reg_tel::Dict{Symbol, T}
 	"Stellar regularization coefficients"
 	reg_star::Dict{Symbol, T}
+	"Telluric model regularization coefficients"
+	reg_model::Dict{Symbol, T}
 	"Matrices to interpolate stellar model to observed wavelengths (barycenter 2 observed)"
 	b2o::AbstractVector{<:SparseMatrixCSC}
 	"Matrices to interpolate telluric model to observed wavelengths (telluric 2 observed)"
@@ -694,6 +699,8 @@ struct OrderModelWobble{T<:Number} <: OrderModel
 	reg_tel::Dict{Symbol, T}
 	"Stellar regularization coefficients"
 	reg_star::Dict{Symbol, T}
+	"Telluric model regularization coefficients"
+	reg_model::Dict{Symbol, T}
 	"Linear interpolation helper objects to interpolate stellar model to observed wavelengths (barycenter 2 observed)"
 	b2o::StellarInterpolationHelper
 	"Approximate barycentric correction \"RVs\" (using `(λ1-λ0)/λ0 = λ1/λ0 - 1 = e^D - 1 ≈ β = v / c`)"
@@ -724,6 +731,7 @@ Constructor for the `OrderModel`-type objects (SSOF model for a set of 1D spectr
 - `log_λ_gp_tel::Real=1/LSF_gp_params.λ`: The log λ lengthscale of the telluric regularization GP
 - `tel_log_λ::Union{Nothing,AbstractRange}=nothing`: The log
 - `star_log_λ::Union{Nothing,AbstractRange}=nothing`: The log λ lengthscale of the telluric regularization GP
+- `use_tel_prior`::Bool=true`: Whether to include a modeled prior in the telluric submodel
 - `kwargs...`: kwargs passed to `Submodel` constructors
 """
 function OrderModel(
@@ -739,6 +747,7 @@ function OrderModel(
 	log_λ_gp_tel::Real=1/LSF_gp_params.λ,
 	tel_log_λ::Union{Nothing,AbstractRange}=nothing,
 	star_log_λ::Union{Nothing,AbstractRange}=nothing,
+	use_tel_prior::Bool=true,
 	kwargs...)
 
 	# Creating models
@@ -750,8 +759,8 @@ function OrderModel(
 		rv = zeros(n_obs)
 
 	bary_rvs = D_to_rv.([median(d.log_λ_star[:, i] - d.log_λ_obs[:, i]) for i in 1:n_obs])
-	todo = Dict([(:initialized, false), (:reg_improved, false), (:err_estimated, false)])
-	metadata = Dict([(:todo, todo), (:instrument, instrument), (:order, order), (:star, star_str)])
+	todo = Dict([(:initialized, false), (:reg_improved, false), (:err_estimated, false), (:h2o_tried, false), (:oxy_tried, false)])
+	metadata = Dict([(:todo, todo), (:tel_prior, use_tel_prior), (:instrument, instrument), (:order, order), (:star, star_str), (:h2o_vector, 0), (:oxy_vector, 0)])
 	if dpca
 		if oversamp
 			b2o = oversamp_interp_helper(d.log_λ_star_bounds, star.log_λ)
@@ -760,7 +769,7 @@ function OrderModel(
 			b2o = undersamp_interp_helper(d.log_λ_star, star.log_λ)
 			t2o = undersamp_interp_helper(d.log_λ_obs, tel.log_λ)
 		end
-		return OrderModelDPCA(tel, star, rv, copy(default_reg_tel), copy(default_reg_star), b2o, t2o, metadata, n_obs)
+		return OrderModelDPCA(tel, star, rv, copy(default_reg_tel), copy(default_reg_star), copy(default_reg_model), b2o, t2o, metadata, n_obs)
 	else
 		b2o = StellarInterpolationHelper(star.log_λ, bary_rvs, d.log_λ_obs)
 		if oversamp
@@ -768,17 +777,19 @@ function OrderModel(
 		else
 			t2o = undersamp_interp_helper(d.log_λ_obs, tel.log_λ)
 		end
-		return OrderModelWobble(tel, star, rv, copy(default_reg_tel), copy(default_reg_star), b2o, bary_rvs, t2o, metadata, n_obs)
+		return OrderModelWobble(tel, star, rv, copy(default_reg_tel), copy(default_reg_star), copy(default_reg_model), b2o, bary_rvs, t2o, metadata, n_obs)
 	end
 end
-Base.copy(om::OrderModelDPCA) = OrderModelDPCA(copy(om.tel), copy(om.star), copy(om.rv), copy(om.reg_tel), copy(om.reg_star), om.b2o, om.t2o, copy(om.metadata), om.n)
+Base.copy(om::OrderModelDPCA) = OrderModelDPCA(copy(om.tel), copy(om.star), copy(om.rv), copy(om.reg_tel), copy(om.reg_star), copy(om.reg_model), 
+	om.b2o, om.t2o, deepcopy(om.metadata), om.n)
 (om::OrderModelDPCA)(inds::AbstractVecOrMat) =
 	OrderModelDPCA(om.tel(inds), om.star(inds), om.rv(inds), copy(om.reg_tel),
-		copy(om.reg_star), view(om.b2o, inds), view(om.t2o, inds), copy(om.metadata), length(inds))
-Base.copy(om::OrderModelWobble) = OrderModelWobble(copy(om.tel), copy(om.star), copy(om.rv), copy(om.reg_tel), copy(om.reg_star), copy(om.b2o), om.bary_rvs, om.t2o, copy(om.metadata), om.n)
+		copy(om.reg_star), copy(om.reg_model), view(om.b2o, inds), view(om.t2o, inds), deepcopy(om.metadata), length(inds))
+Base.copy(om::OrderModelWobble) = OrderModelWobble(copy(om.tel), copy(om.star), copy(om.rv), copy(om.reg_tel), copy(om.reg_star), copy(om.reg_model),
+	copy(om.b2o), om.bary_rvs, om.t2o, deepcopy(om.metadata), om.n)
 (om::OrderModelWobble)(inds::AbstractVecOrMat) =
-	OrderModelWobble(om.tel(inds), om.star(inds), view(om.rv, inds), copy(om.reg_tel),
-		copy(om.reg_star), om.b2o(inds, length(om.star.lm.μ)), view(om.bary_rvs, inds), view(om.t2o, inds), copy(om.metadata), length(inds))
+	OrderModelWobble(om.tel(inds), om.star(inds), view(om.rv, inds), copy(om.reg_tel), copy(om.reg_star), copy(om.reg_model), 
+		om.b2o(inds, length(om.star.lm.μ)), view(om.bary_rvs, inds), view(om.t2o, inds), deepcopy(om.metadata), length(inds))
 
 
 """
@@ -797,6 +808,7 @@ end
 	rm_regularization!(om)
 
 Remove all of the keys in the regularization Dicts
+Currently does not affect om.reg_model
 """
 function rm_regularization!(om::OrderModel)
 	rm_dict!(om.reg_tel)
@@ -912,12 +924,12 @@ downsize(m::OrderModelDPCA, n_comp_tel::Int, n_comp_star::Int) =
 	OrderModelDPCA(
 		downsize(m.tel, n_comp_tel),
 		downsize(m.star, n_comp_star),
-		copy(m.rv), copy(m.reg_tel), copy(m.reg_star), m.b2o, m.t2o, copy(m.metadata), m.n)
+		copy(m.rv), copy(m.reg_tel), copy(m.reg_star), copy(m.reg_model), m.b2o, m.t2o, deepcopy(m.metadata), m.n)
 downsize(m::OrderModelWobble, n_comp_tel::Int, n_comp_star::Int) =
 	OrderModelWobble(
 		downsize(m.tel, n_comp_tel),
 		downsize(m.star, n_comp_star),
-		copy(m.rv), copy(m.reg_tel), copy(m.reg_star), copy(m.b2o), m.bary_rvs, m.t2o, copy(m.metadata), m.n)
+		copy(m.rv), copy(m.reg_tel), copy(m.reg_star), copy(m.reg_model), copy(m.b2o), m.bary_rvs, m.t2o, deepcopy(m.metadata), m.n)
 
 
 """
@@ -944,12 +956,12 @@ downsize_view(m::OrderModelDPCA, n_comp_tel::Int, n_comp_star::Int) =
 	OrderModelDPCA(
 		downsize_view(m.tel, n_comp_tel),
 		downsize_view(m.star, n_comp_star),
-		m.rv, copy(m.reg_tel), copy(m.reg_star), m.b2o, m.t2o, copy(m.metadata), m.n)
+		m.rv, copy(m.reg_tel), copy(m.reg_star), copy(m.reg_model), m.b2o, m.t2o, deepcopy(m.metadata), m.n)
 downsize_view(m::OrderModelWobble, n_comp_tel::Int, n_comp_star::Int) =
 	OrderModelWobble(
 		downsize_view(m.tel, n_comp_tel),
 		downsize_view(m.star, n_comp_star),
-		m.rv, copy(m.reg_tel), copy(m.reg_star), m.b2o, m.bary_rvs, m.t2o, copy(m.metadata), m.n)
+		m.rv, copy(m.reg_tel), copy(m.reg_star), copy(m.reg_model), m.b2o, m.bary_rvs, m.t2o, deepcopy(m.metadata), m.n)
 
 """
 	spectra_interp(model, interp_helper)
@@ -1245,7 +1257,7 @@ end
 """
 	model_prior(lm, om, key)
 
-Calulate the model prior on `lm` with the regularization terms in `om.reg_` * `key`
+Calculate the model prior on `lm` with the regularization terms in `om.reg_` * `key`
 """
 function model_prior(lm, om::OrderModel, key::Symbol)
 	reg = getfield(om, Symbol(:reg_, key))
@@ -1296,18 +1308,40 @@ function model_s_prior(s, reg::Dict)
 end
 
 
+## TEMPORARY - TODO: INTEGRATE FUNCTIONS INTO SSOF
+include("/home/kment/RV/telluricfunc.jl")
 """
 	tel_prior(om)
 
-Calulate the telluric model prior on `om.tel.lm` with the regularization terms in `om.reg_tel`
+Calculate the telluric model prior on `om.tel.lm` with the regularization terms in `om.reg_model`
 """
+function tel_prior(lm, om::OrderModel)
+	
+	val = model_prior(lm, om, :tel)
+
+	if om.metadata[:tel_prior] && haskey(om.reg_model, :L2_μ)
+		val += L2(get_telluric_prior_spectrum(om.tel.λ) - lm[min(3, length(lm))]) * om.reg_model[:L2_μ]
+	end
+
+	if om.metadata[:tel_prior] && length(lm) >= 3
+		if om.metadata[:h2o_vector] >= 1 && size(lm[1], 2) >= om.metadata[:h2o_vector] && haskey(om.reg_model, :L2_h2o)
+			val += L2(get_telluric_prior_spectrum(om.tel.λ, :h2o) - lm[1][:,om.metadata[:h2o_vector]] .- 1) * om.reg_model[:L2_h2o]
+		end
+		if om.metadata[:oxy_vector] >= 1 && size(lm[1], 2) >= om.metadata[:oxy_vector] && haskey(om.reg_model, :L2_oxy)
+			val += L2(get_telluric_prior_spectrum(om.tel.λ, :oxy) - lm[1][:,om.metadata[:oxy_vector]] .- 1) * om.reg_model[:L2_oxy]
+		end
+	end
+
+	return val
+
+end
+tel_prior(lm::Union{FullLinearModel, TemplateModel}, om::OrderModel) = tel_prior(vec(lm), om)
 tel_prior(om::OrderModel) = tel_prior(om.tel.lm, om)
-tel_prior(lm, om::OrderModel) = model_prior(lm, om, :tel)
 
 """
 	star_prior(om)
 
-Calulate the stellar model prior on `om.star.lm` with the regularization terms in `om.star_tel`
+Calculate the stellar model prior on `om.star.lm` with the regularization terms in `om.star_tel`
 """
 star_prior(om::OrderModel) = star_prior(om.star.lm, om)
 star_prior(lm, om::OrderModel) = model_prior(lm, om, :star)

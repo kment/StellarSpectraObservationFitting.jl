@@ -49,6 +49,7 @@ end
 _loss_diagnostic(mws::ModelWorkspace; kwargs...) = _loss_diagnostic(mws.o, mws.om, mws.d; kwargs...)
 
 # summed χ² loss functions
+#_loss(model, data, variance) = sum(_χ²_loss(model, data, variance))
 _loss(tel, star, rv, d::Data; kwargs...) = sum(__loss_diagnostic(tel, star, rv, d; kwargs...))
 _loss(tel, star, d::Data; kwargs...) = sum(__loss_diagnostic(tel, star, d; kwargs...))
 _loss(o::Output, om::OrderModel, d::Data; kwargs...) = sum(_loss_diagnostic(o, om, d; kwargs...))
@@ -73,6 +74,7 @@ _loss_recalc_rv_basis(mws::ModelWorkspace; kwargs...) = _loss_recalc_rv_basis(mw
 Create a loss function for the model and data in `mws`
 """
 function loss_func(mws::ModelWorkspace; include_priors::Bool=false)
+	println("loss_func() called with include_priors=", include_priors) 		# DEBUG
 	if include_priors
 		return (; kwargs...) -> _loss(mws; kwargs...) + tel_prior(mws.om) + star_prior(mws.om)
 	else
@@ -92,6 +94,7 @@ Create loss functions for changing
 Used to fit scores efficiently with L-BFGS
 """
 function loss_funcs_telstar(o::Output, om::OrderModel, d::Data)
+	println("loss_funcs_telstar() called")		# DEBUG
     l_telstar(telstar; kwargs...) =
         _loss(o, om, d; tel=telstar[1], star=telstar[2], kwargs...) +
 			tel_prior(telstar[1], om) + star_prior(telstar[2], om)
@@ -135,6 +138,7 @@ Create loss functions for changing
 Used to fit models with ADAM
 """
 function loss_funcs_total(o::Output, om::OrderModelDPCA, d::Data)
+	println("loss_funcs_total() called")		# DEBUG
     l_total(total) =
 		_loss_recalc_rv_basis(o, om, d; tel=total[1], star=total[2], rv=total[3]) +
 		tel_prior(total[1], om) + star_prior(total[2], om)
@@ -165,9 +169,17 @@ function loss_funcs_total(o::Output, om::OrderModelDPCA, d::Data)
     return l_total, l_total_s
 end
 function loss_funcs_total(o::Output, om::OrderModelWobble, d::Data)
-	l_total(total) =
+	println("loss_funcs_total() wobble called")		# DEBUG
+	"""l_total(total) =
 		_loss(o, om, d; tel=total[1], star=total[2], rv=total[3]) +
-		tel_prior(total[1], om) + star_prior(total[2], om)
+		tel_prior(total[1], om) + star_prior(total[2], om)"""
+	function l_total(total)		# DEBUG
+		p_loss = _loss(o, om, d; tel=total[1], star=total[2], rv=total[3])
+		p_tel = tel_prior(total[1], om) 
+		p_star = star_prior(total[2], om)
+		#println("LOSS: ", p_loss, "   PTEL: ", p_tel, "   PSTAR: ", p_star)
+		return p_loss + p_tel + p_star
+	end
 	is_tel_time_variable = is_time_variable(om.tel)
 	is_star_time_variable = is_time_variable(om.star)
     function l_total_s(total_s)
@@ -699,7 +711,7 @@ function train_OrderModel!(mws::AdamWorkspace; ignore_regularization::Bool=false
 
 	update_interpolation_locations!(mws)
 
-	# optionally ignore the regularization in `mws.om`
+	# optionally ignore the regularization in `mws.om` (except om.reg_model)
     if ignore_regularization
         reg_tel_holder = copy(mws.om.reg_tel)
         reg_star_holder = copy(mws.om.reg_star)
@@ -960,7 +972,7 @@ function train_OrderModel!(ow::OptimTelStarWorkspace; verbose::Bool=_verbose_def
 	
 	optim_cb = optim_cb_f(; verbose=verbose)
 
-	# optionally ignore the regularization in `ow.om`
+	# optionally ignore the regularization in `ow.om` (except ow.om.reg_model)
     if ignore_regularization
         reg_tel_holder = copy(ow.om.reg_tel)
         reg_star_holder = copy(ow.om.reg_star)
@@ -1017,7 +1029,7 @@ function train_OrderModel!(ow::OptimTotalWorkspace; verbose::Bool=_verbose_def, 
 	
 	optim_cb = optim_cb_f(; verbose=verbose)
 
-	# optionally ignore the regularization in `ow.om`
+	# optionally ignore the regularization in `ow.om` (except ow.om.reg_model)
     if ignore_regularization
         reg_tel_holder = copy(ow.om.reg_tel)
         reg_star_holder = copy(ow.om.reg_star)
@@ -1211,6 +1223,7 @@ Defaults to returning the AIC-minimum model
 - `max_n_tel::Int=5`: The maximum amount of telluric feature vectors to look for
 - `max_n_star::Int=5`: The maximum amount of stellar feature vectors to look for
 - `use_all_comps::Bool=false`: Whether to use all feature vectors, regardless of AIC
+- `use_tel_prior::Bool=false`: Whether to use a modeled prior on telluric feature vectors
 - `careful_first_step::Bool=true`: Whether to shrink the learning rates until the loss improves on the first iteration
 - `speed_up::Bool=false`: Whether to inflate the learning rates until the loss is no longer improving throughout the optimization
 - `log_λ_gp_star::Real=1/SOAP_gp_params.λ`: The log λ lengthscale of the stellar regularization GP
@@ -1221,7 +1234,8 @@ function calculate_initial_model(data::Data;
 	instrument::String="None", desired_order::Int=0, star::String="None", times::AbstractVector=1:size(data.flux, 2),
 	μ_min::Real=0, μ_max::Real=Inf, use_mean::Bool=true, stop_early::Bool=false,
 	remove_reciprocal_continuum::Bool=false, return_full_path::Bool=false,
-	max_n_tel::Int=5, max_n_star::Int=5, use_all_comps::Bool=false, careful_first_step::Bool=true, speed_up::Bool=false, 
+	max_n_tel::Int=5, max_n_star::Int=5, use_all_comps::Bool=false, use_tel_prior::Bool=false,
+	careful_first_step::Bool=true, speed_up::Bool=false, 
 	log_λ_gp_star::Real=1/SOAP_gp_params.λ, log_λ_gp_tel::Real=1/LSF_gp_params.λ, kwargs...)
 	# TODO: Make this work for OrderModelDPCA
 
@@ -1247,8 +1261,14 @@ function calculate_initial_model(data::Data;
 	comp2ind(n_tel::Int, n_star::Int) = (n_tel+2, n_star+1)  # converts number of components to storage matrix index
 	n_obs = size(d.flux, 2)
 
-	om = OrderModel(d; instrument=instrument, order=desired_order, star_str=star, n_comp_tel=max_n_tel, n_comp_star=max_n_star, log_λ_gp_star=log_λ_gp_star, log_λ_gp_tel=log_λ_gp_tel, kwargs...)
+	om = OrderModel(d; instrument=instrument, order=desired_order, star_str=star, n_comp_tel=max_n_tel, n_comp_star=max_n_star, log_λ_gp_star=log_λ_gp_star, log_λ_gp_tel=log_λ_gp_tel, use_tel_prior=use_tel_prior, kwargs...)
 	
+	# TEMPORARY - FIX TELLURIC PRIOR TO BASIS VECTORS 1 AND 2
+	if use_tel_prior
+		om.metadata[:h2o_vector] = 1
+		om.metadata[:oxy_vector] = 2
+	end
+
 	# get the stellar model wavelengths in observed frame as a function of time
 	star_log_λ_tel = _shift_log_λ_model(d.log_λ_obs, d.log_λ_star, om.star.log_λ)
 	# get the telluric model wavelengths in stellar frame as a function of time
@@ -1595,6 +1615,8 @@ function calculate_initial_model(data::Data;
 			# flux_star .= _eval_lm(oms[i...].star.lm)
 			interp_to_tel!(oms[i...])# .+ rv_to_D(oms[i...].rv)')  # the rv is a small effect that we could just be getting wrong
 			if n_tel_cur + 1 > 0  # if we are trying to add a feature vector
+				println(oms[i...].metadata) # DEBUG
+				println(oms[i...].reg_model)
 				EMPCA.EMPCA!(oms[i...].tel.lm, flux_tel, 1 ./ vars_tel; inds=(n_tel_cur+1):(n_tel_cur+1))
 			else # if we are trying to add a template
 				oms[i...].tel.lm.μ .= make_template(flux_tel, vars_tel; min=μ_min, max=μ_max, use_mean=use_mean)
