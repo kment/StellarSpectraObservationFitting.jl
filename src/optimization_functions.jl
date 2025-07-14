@@ -74,7 +74,6 @@ _loss_recalc_rv_basis(mws::ModelWorkspace; kwargs...) = _loss_recalc_rv_basis(mw
 Create a loss function for the model and data in `mws`
 """
 function loss_func(mws::ModelWorkspace; include_priors::Bool=false)
-	println("loss_func() called with include_priors=", include_priors) 		# DEBUG
 	if include_priors
 		return (; kwargs...) -> _loss(mws; kwargs...) + tel_prior(mws.om) + star_prior(mws.om)
 	else
@@ -94,7 +93,6 @@ Create loss functions for changing
 Used to fit scores efficiently with L-BFGS
 """
 function loss_funcs_telstar(o::Output, om::OrderModel, d::Data)
-	println("loss_funcs_telstar() called")		# DEBUG
     l_telstar(telstar; kwargs...) =
         _loss(o, om, d; tel=telstar[1], star=telstar[2], kwargs...) +
 			tel_prior(telstar[1], om) + star_prior(telstar[2], om)
@@ -138,7 +136,6 @@ Create loss functions for changing
 Used to fit models with ADAM
 """
 function loss_funcs_total(o::Output, om::OrderModelDPCA, d::Data)
-	println("loss_funcs_total() called")		# DEBUG
     l_total(total) =
 		_loss_recalc_rv_basis(o, om, d; tel=total[1], star=total[2], rv=total[3]) +
 		tel_prior(total[1], om) + star_prior(total[2], om)
@@ -169,17 +166,9 @@ function loss_funcs_total(o::Output, om::OrderModelDPCA, d::Data)
     return l_total, l_total_s
 end
 function loss_funcs_total(o::Output, om::OrderModelWobble, d::Data)
-	println("loss_funcs_total() wobble called")		# DEBUG
-	"""l_total(total) =
+	l_total(total) =
 		_loss(o, om, d; tel=total[1], star=total[2], rv=total[3]) +
-		tel_prior(total[1], om) + star_prior(total[2], om)"""
-	function l_total(total)		# DEBUG
-		p_loss = _loss(o, om, d; tel=total[1], star=total[2], rv=total[3])
-		p_tel = tel_prior(total[1], om) 
-		p_star = star_prior(total[2], om)
-		#println("LOSS: ", p_loss, "   PTEL: ", p_tel, "   PSTAR: ", p_star)
-		return p_loss + p_tel + p_star
-	end
+		tel_prior(total[1], om) + star_prior(total[2], om)
 	is_tel_time_variable = is_time_variable(om.tel)
 	is_star_time_variable = is_time_variable(om.star)
     function l_total_s(total_s)
@@ -722,14 +711,15 @@ function train_OrderModel!(mws::AdamWorkspace; ignore_regularization::Bool=false
 	function cb(as::AdamState)
 
 		# optionally shift the score means to be near 0
-		if shift_scores
-			if !(typeof(mws) <: FrozenTelWorkspace)
-				remove_lm_score_means!(mws.om.tel.lm; prop=0.2)
-			end
-			if typeof(mws.om) <: OrderModelWobble
-				remove_lm_score_means!(mws.om.star.lm; prop=0.2)
-			end
-		end
+		# DEBUG this has been turned off to test simulated telluric models
+		#if shift_scores
+		#	if !(typeof(mws) <: FrozenTelWorkspace)
+		#		remove_lm_score_means!(mws.om.tel.lm; prop=0.2)
+		#	end
+		#	if typeof(mws.om) <: OrderModelWobble
+		#		remove_lm_score_means!(mws.om.star.lm; prop=0.2)
+		#	end
+		#end
 
 		# optionally make the templates always positive
 		if μ_positive
@@ -1228,6 +1218,10 @@ Defaults to returning the AIC-minimum model
 - `speed_up::Bool=false`: Whether to inflate the learning rates until the loss is no longer improving throughout the optimization
 - `log_λ_gp_star::Real=1/SOAP_gp_params.λ`: The log λ lengthscale of the stellar regularization GP
 - `log_λ_gp_tel::Real=1/LSF_gp_params.λ`: The log λ lengthscale of the telluric regularization GP
+- `reg_star::Union{Nothing,Dict{Symbol,Float64}}=nothing`: Override default_reg_star if given
+- `reg_tel::Union{Nothing,Dict{Symbol,Float64}}=nothing`: Override default_reg_tel if given
+- `reg_model::Union{Nothing,Dict{Symbol,Float64}}=nothing`: Override default_reg_model if given
+- `fixed_vectors::Dict=Dict()`: Fix any stellar or telluric vectors. Must contain 'log_λ'
 - `kwargs...`: kwargs passed to `OrderModel` constructor
 """
 function calculate_initial_model(data::Data;
@@ -1236,13 +1230,21 @@ function calculate_initial_model(data::Data;
 	remove_reciprocal_continuum::Bool=false, return_full_path::Bool=false,
 	max_n_tel::Int=5, max_n_star::Int=5, use_all_comps::Bool=false, use_tel_prior::Bool=false,
 	careful_first_step::Bool=true, speed_up::Bool=false, 
-	log_λ_gp_star::Real=1/SOAP_gp_params.λ, log_λ_gp_tel::Real=1/LSF_gp_params.λ, kwargs...)
+	log_λ_gp_star::Real=1/SOAP_gp_params.λ, log_λ_gp_tel::Real=1/LSF_gp_params.λ, 
+	reg_star::Union{Nothing,Dict{Symbol,Float64}}=nothing, reg_tel::Union{Nothing,Dict{Symbol,Float64}}=nothing,
+	reg_model::Union{Nothing,Dict{Symbol,Float64}}=nothing, fixed_vectors::Dict=Dict(), kwargs...)
 	# TODO: Make this work for OrderModelDPCA
 
 	# Get non-LSF version of `data`
 	d = GenericData(data)
 
-	@assert max_n_tel >= -1
+	# Determine the types of telluric priors used (if any)
+	use_tel_prior_μ = use_tel_prior && !isnothing(reg_model) && haskey(reg_model, :L2_μ)
+	use_tel_prior_h2o = use_tel_prior && !isnothing(reg_model) && haskey(reg_model, :L2_h2o)
+	use_tel_prior_oxy = use_tel_prior && !isnothing(reg_model) && haskey(reg_model, :L2_oxy)
+	#use_tel_full = !isnothing(reg_model) && haskey(reg_model, :L2_μ) && haskey(reg_model, :L2_h2o) && haskey(reg_model, :L2_oxy)
+
+	@assert max_n_tel >= -1 + use_tel_prior_μ + use_tel_prior_h2o + use_tel_prior_oxy
 	@assert max_n_star >= 0
 
 	# which amounts of feature vectors to test
@@ -1261,12 +1263,16 @@ function calculate_initial_model(data::Data;
 	comp2ind(n_tel::Int, n_star::Int) = (n_tel+2, n_star+1)  # converts number of components to storage matrix index
 	n_obs = size(d.flux, 2)
 
-	om = OrderModel(d; instrument=instrument, order=desired_order, star_str=star, n_comp_tel=max_n_tel, n_comp_star=max_n_star, log_λ_gp_star=log_λ_gp_star, log_λ_gp_tel=log_λ_gp_tel, use_tel_prior=use_tel_prior, kwargs...)
+	om = OrderModel(d; instrument=instrument, order=desired_order, star_str=star, n_comp_tel=max_n_tel, n_comp_star=max_n_star, 
+					log_λ_gp_star=log_λ_gp_star, log_λ_gp_tel=log_λ_gp_tel, use_tel_prior=use_tel_prior, reg_star=reg_star, 
+					reg_tel=reg_tel, reg_model=reg_model, fixed_vectors=fixed_vectors, kwargs...)
 	
-	# TEMPORARY - FIX TELLURIC PRIOR TO BASIS VECTORS 1 AND 2
-	if use_tel_prior
+	# Add telluric priors to specific vectors
+	if use_tel_prior_h2o
 		om.metadata[:h2o_vector] = 1
-		om.metadata[:oxy_vector] = 2
+	end
+	if use_tel_prior_oxy
+		om.metadata[:oxy_vector] = (use_tel_prior_h2o ? 2 : 1)
 	end
 
 	# get the stellar model wavelengths in observed frame as a function of time
@@ -1357,16 +1363,18 @@ function calculate_initial_model(data::Data;
 
 	# remove the score means and flip the feature vectors
 	function nicer_model!(mws::ModelWorkspace)
-		remove_lm_score_means!(mws.om)
-		flip_feature_vectors!(mws.om)
+		if !use_tel_prior
+			remove_lm_score_means!(mws.om)
+			flip_feature_vectors!(mws.om)
+		end
 		mws.om.metadata[:todo][:initialized] = true
 		mws.om.metadata[:todo][:downsized] = true
 		# copy_dict!(mws.om.reg_tel, default_reg_tel)
 		# copy_dict!(mws.om.reg_star, default_reg_star)
 	end
 
-	# 
-	function get_metrics!(mws::ModelWorkspace, i::Int, j::Int)
+	# If only_s then optimizes scores only
+	function get_metrics!(mws::ModelWorkspace, i::Int, j::Int; only_s::Bool=false)
 		
 		# # could set very small regularizations beforehand if we wanted
 		# for (k, v) in mws.om.reg_tel
@@ -1378,13 +1386,17 @@ function calculate_initial_model(data::Data;
 
 
 		try
-			# improve the model
-			improve_initial_model!(mws; careful_first_step=careful_first_step, speed_up=speed_up, iter=50)
+			if only_s
+				finalize_scores!(mws; iter=50)
+			else
+				# improve the model
+				improve_initial_model!(mws; careful_first_step=careful_first_step, speed_up=speed_up, iter=50)
 
-			# if there is an LSF, do some more fitting
-			if mws.d != data
-				mws = typeof(mws)(copy(mws.om), data)
-				improve_initial_model!(mws; careful_first_step=careful_first_step, speed_up=speed_up, iter=30)
+				# if there is an LSF, do some more fitting
+				if mws.d != data
+					mws = typeof(mws)(copy(mws.om), data)
+					improve_initial_model!(mws; careful_first_step=careful_first_step, speed_up=speed_up, iter=30)
+				end
 			end
 			nicer_model!(mws)
 
@@ -1410,6 +1422,9 @@ function calculate_initial_model(data::Data;
 		end
 	end
 
+	# Whether the stellar mean vector stays fixed
+	μ_star_fixed = haskey(fixed_vectors, "log_λ") && haskey(fixed_vectors, "star_μ")
+
 	# stellar template model assuming no tellurics
 	n_tel_cur = -1
 	n_star_cur = 0
@@ -1417,10 +1432,22 @@ function calculate_initial_model(data::Data;
 	search_new_star = n_star_cur+1 <= max_n_star
 	oms[1,1] = downsize(om, 0, 0)
 	oms[1,1].tel.lm.μ .= 1
-	_spectra_interp_gp!(flux_star, vars_star, oms[1,1].star.log_λ, d.flux, d.var .+ SOAP_gp_var, d.log_λ_star; gp_mean=1., λ_kernel=1/log_λ_gp_star)
+	if μ_star_fixed
+		println("Using fixed stellar mean vector.")
+		_flux_star_interp = CubicSpline(fixed_vectors["star_μ"], fixed_vectors["log_λ"]; extrapolate=true)
+		flux_star_interp = _flux_star_interp(oms[1,1].star.log_λ)
+		flux_star_interp[oms[1,1].star.log_λ .< minimum(fixed_vectors["log_λ"])] .= 1
+		flux_star_interp[oms[1,1].star.log_λ .> maximum(fixed_vectors["log_λ"])] .= 1
+		oms[1,1].star.lm.μ[:] = flux_star_interp
+		flux_star .*= flux_star_interp
+		#oms[1,1].star.lm.μ[:] = make_template(flux_star, vars_star; min=μ_min, max=μ_max, use_mean=use_mean)
+		println(sum(oms[1,1].star.lm.μ))
+	else
+		_spectra_interp_gp!(flux_star, vars_star, oms[1,1].star.log_λ, d.flux, d.var .+ SOAP_gp_var, d.log_λ_star; gp_mean=1., λ_kernel=1/log_λ_gp_star)
+		oms[1,1].star.lm.μ[:] = make_template(flux_star, vars_star; min=μ_min, max=μ_max, use_mean=use_mean)
+	end
 	flux_star_no_tel = copy(flux_star)
 	vars_star_no_tel = copy(vars_star)
-	oms[1,1].star.lm.μ[:] = make_template(flux_star, vars_star; min=μ_min, max=μ_max, use_mean=use_mean)
 	
 	# how good is the stellar template at modeling each pixel
 	dop_comp = doppler_component(oms[1,1].star.λ, oms[1,1].star.lm.μ)
@@ -1432,7 +1459,7 @@ function calculate_initial_model(data::Data;
 
 	# get aic for base, only stellar template model
 	mws = FrozenTelWorkspace(oms[1,1], d)
-	om_cur = get_metrics!(mws, 1, 1)
+	om_cur = get_metrics!(mws, 1, 1; only_s=μ_star_fixed)
 
 	# telluric template assuming no stellar (will be overwritten later)
 	_om = downsize(om, 0, 0)
@@ -1494,9 +1521,68 @@ function calculate_initial_model(data::Data;
 	# interp_to_tel!(; kwargs...) = interp_helper!(flux_tel, vars_tel, om.tel.log_λ,
 	# 	flux_star, vars_star, star_log_λ_tel,
 	# 	d.log_λ_obs; kwargs...)
+
+	# Make a telluric template after dividing out a partial stellar template
+	function make_telluric_template!(om::OrderModel)
+
+		use_tel = χ²_star .> χ²_tel  # which pixels are telluric dominated
+
+		# mask out the telluric dominated pixels for partial stellar template estimation
+		_var = copy(d.var)
+		_var[use_tel, :] .= Inf
+
+		# get stellar template in portions of spectra where it is dominant
+		_spectra_interp_gp!(flux_star, vars_star, om.star.log_λ, d.flux, _var .+ SOAP_gp_var, d.log_λ_star; gp_mean=1., λ_kernel=1/log_λ_gp_star)
+		om.star.lm.μ[:] = make_template(flux_star, vars_star; min=μ_min, max=μ_max, use_mean=use_mean)
+
+		# get telluric template after dividing out the partial stellar template
+		# flux_star .= oms[2,1].star.lm.μ
+		interp_to_tel!(om; mask_extrema=false)
+		om.tel.lm.μ[:] = make_template(flux_tel, vars_tel; min=μ_min, max=μ_max, use_mean=use_mean)
+
+	end
+
+	# If the telluric prior is turned on, add the respective mean and/or vectors (all added simultaneously)
+	if use_tel_prior
+
+		n_tel_next = use_tel_prior_h2o + use_tel_prior_oxy
+		i = comp2ind(n_tel_next, n_star_cur)
+		oms[i...] = downsize(om, n_tel_next, n_star_cur)
+
+		if use_tel_prior_μ
+			oms[i...].tel.lm.μ[:] = get_telluric_prior_spectrum(oms[i...].tel.λ)
+		else
+			make_telluric_template!(oms[i...])
+		end
+
+		if use_tel_prior_h2o
+			oms[i...].tel.lm.M[:,1] = log.(get_telluric_prior_spectrum(oms[i...].tel.λ, :h2o))
+		end
+
+		if use_tel_prior_oxy
+			oms[i...].tel.lm.M[:,1+use_tel_prior_h2o] = log.(get_telluric_prior_spectrum(oms[i...].tel.λ, :oxy))
+		end
+
+		# Optimize scores first (with no stellar spectrum) if priors are on any vectors
+		if n_tel_next > 0
+			oms[i...].star.lm.μ .= 1
+			_mws = TotalWorkspace(oms[i...], d; only_s=true)
+			finalize_scores!(_mws; iter=50)
+		end
+
+		# get stellar template after dividing out full telluric template
+		interp_to_star!(oms[i...]; mask_extrema=false)
+		oms[i...].star.lm.μ[:] = make_template(flux_star, vars_star; min=μ_min, max=μ_max, use_mean=use_mean)
+
+		mws = TotalWorkspace(oms[i...], d)
+		# flux_tel .= oms[2,1].tel.lm.μ
+		# interp_to_star!(; mask_extrema=false)
+		# mws.om.rv .= vec(project_doppler_comp(flux_star .- mws.om.star.lm.μ, doppler_component(mws.om.star.λ, mws.om.star.lm.μ), 1 ./ vars_star))
+		om_add_tel = get_metrics!(mws, i...)
+		added_tel_better = true
 	
 	# if one wants to search for a telluric template
-	if search_new_tel
+	elseif search_new_tel
 
 		oms[2,1] = downsize(om, 0, 0)
 		oms[2,1].star.lm.μ .= 1
@@ -1522,21 +1608,22 @@ function calculate_initial_model(data::Data;
 		# 	end
 		# end
 
-
-		if sum(use_tel) > 0  # if any pixels are telluric dominated
+		if sum(use_tel) > 0 && !μ_star_fixed  # if any pixels are telluric dominated (unless μ_star is fixed)
 
 			# mask out the telluric dominated pixels for partial stellar template estimation
-			_var = copy(d.var)
-			_var[use_tel, :] .= Inf
+			#_var = copy(d.var)
+			#_var[use_tel, :] .= Inf
 
 			# get stellar template in portions of spectra where it is dominant
-			_spectra_interp_gp!(flux_star, vars_star, oms[2,1].star.log_λ, d.flux, _var .+ SOAP_gp_var, d.log_λ_star; gp_mean=1., λ_kernel=1/log_λ_gp_star)
-			oms[2,1].star.lm.μ[:] = make_template(flux_star, vars_star; min=μ_min, max=μ_max, use_mean=use_mean)
+			#_spectra_interp_gp!(flux_star, vars_star, oms[2,1].star.log_λ, d.flux, _var .+ SOAP_gp_var, d.log_λ_star; gp_mean=1., λ_kernel=1/log_λ_gp_star)
+			#oms[2,1].star.lm.μ[:] = make_template(flux_star, vars_star; min=μ_min, max=μ_max, use_mean=use_mean)
 
 			# get telluric template after dividing out the partial stellar template
 			# flux_star .= oms[2,1].star.lm.μ
-			interp_to_tel!(oms[2,1]; mask_extrema=false)
-			oms[2,1].tel.lm.μ[:] = make_template(flux_tel, vars_tel; min=μ_min, max=μ_max, use_mean=use_mean)
+			#interp_to_tel!(oms[2,1]; mask_extrema=false)
+			#oms[2,1].tel.lm.μ[:] = make_template(flux_tel, vars_tel; min=μ_min, max=μ_max, use_mean=use_mean)
+
+			make_telluric_template!(oms[2,1])
 
 			# get stellar template after dividing out full telluric template
 			# flux_tel .= oms[2,1].tel.lm.μ
@@ -1564,23 +1651,27 @@ function calculate_initial_model(data::Data;
 		# mws.om.rv .= vec(project_doppler_comp(flux_star .- mws.om.star.lm.μ, doppler_component(mws.om.star.λ, mws.om.star.lm.μ), 1 ./ vars_star))
 		om_add_tel = get_metrics!(mws, 2, 1)
 
+		# Was the model with a telluric template better than the current model (just a stellar template)?
+		added_tel_better = aics[comp2ind(n_tel_cur+1, n_star_cur)...] < aics[comp2ind(n_tel_cur, n_star_cur)...]
+
 	else
 	
 		om_add_tel = om_cur
+		added_tel_better = false
 	
 	end
 
 	j = comp2ind(n_tel_cur, n_star_cur)
 	# if we looked for a telluric template, get the aic
-	search_new_tel ? aic_tel = aics[comp2ind(n_tel_cur+1, n_star_cur)...] : aic_tel = Inf
+	#search_new_tel ? aic_tel = aics[comp2ind(n_tel_cur+1, n_star_cur)...] : aic_tel = Inf
 	# was the model with a telluric template better than the current model (just a stellar template)?
-	added_tel_better = aic_tel < aics[j...]
+	#added_tel_better = aic_tel < aics[j...]
 	
 	# if including the telluric template model helped, use it going forward
 	if added_tel_better; oms[j...] = om_cur end
 	n_star_next = n_star_cur
-	n_tel_next = n_tel_cur+added_tel_better
-	added_tel_better ? aic_next = aic_tel : aic_next = aics[j...]
+	n_tel_next = n_tel_cur + added_tel_better + use_tel_prior_h2o + use_tel_prior_oxy
+	#added_tel_better ? aic_next = aic_tel : aic_next = aics[j...]
 	
 	add_comp = true
 	println("looking for time variability...")
@@ -1615,8 +1706,6 @@ function calculate_initial_model(data::Data;
 			# flux_star .= _eval_lm(oms[i...].star.lm)
 			interp_to_tel!(oms[i...])# .+ rv_to_D(oms[i...].rv)')  # the rv is a small effect that we could just be getting wrong
 			if n_tel_cur + 1 > 0  # if we are trying to add a feature vector
-				println(oms[i...].metadata) # DEBUG
-				println(oms[i...].reg_model)
 				EMPCA.EMPCA!(oms[i...].tel.lm, flux_tel, 1 ./ vars_tel; inds=(n_tel_cur+1):(n_tel_cur+1))
 			else # if we are trying to add a template
 				oms[i...].tel.lm.μ .= make_template(flux_tel, vars_tel; min=μ_min, max=μ_max, use_mean=use_mean)

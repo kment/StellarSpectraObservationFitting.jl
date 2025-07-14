@@ -39,6 +39,7 @@ function fit_regularization_helper!(reg_fields::Vector{Symbol}, reg_key::Symbol,
     # only do anything if 
     if haskey(getfield(mws.om, reg_fields[1]), reg_key)
 
+        println("Regularization of $reg_key in $(reg_fields[1])")   # DEBUG
         om = mws.om
         @assert 0 < reg_min < reg_max < Inf
         ℓs = Array{Float64}(undef, 2)
@@ -166,6 +167,7 @@ end
 _key_list = [:GP_μ, :L2_μ, :L1_μ, :L1_μ₊_factor, :GP_M, :L2_M, :L1_M, :shared_M]
 _key_list_fit = [:GP_μ, :L2_μ, :L1_μ, :GP_M, :L2_M, :L1_M]
 _key_list_bases = [:GP_M, :L2_M, :L1_M, :shared_M]
+_key_list_model = [:GP_μ, :L2_μ, :L1_μ, :L2_h2o, :L1_h2o, :L2_oxy, :L1_oxy]
 
 
 """
@@ -179,8 +181,10 @@ function check_for_valid_regularization(reg::Dict{Symbol, <:Real})
     end
 end
 
-min_reg = 1e-3
-max_reg = 1e12
+min_reg = 1e-1 #1e-3
+max_reg = 1e7 #1e12
+min_reg_model = 1e0
+max_reg_model = 1e12
 
 
 """
@@ -223,13 +227,39 @@ function fit_regularization!(mws::ModelWorkspace, testing_inds::AbstractVecOrMat
 end
 
 
+"""
+    fit_regularization_model!(mws, testing_inds; key_list=_key_list_model, kwargs...)
+
+Fit all of the regularization values in `key_list` for `mws.om.reg_model`
+"""
+function fit_regularization_model!(mws::ModelWorkspace, testing_inds::AbstractVecOrMat; key_list::Vector{Symbol}=_key_list_model, kwargs...)
+    om = mws.om
+    n_obs = size(mws.d.flux, 2)
+    training_inds = [i for i in 1:n_obs if !(i in testing_inds)]
+    hold_reg = copy(om.reg_model)
+    for (key, value) in om.reg_model
+        om.reg_model[key] = 0
+    end
+    println("starting regularization searches for mws.om.reg_model")
+    before_ℓ = _eval_regularization(copy(mws.om), mws, training_inds, testing_inds)
+    println("initial training χ²: $before_ℓ")
+    test_factor, reg_min, reg_max = 10, min_reg_model, max_reg_model
+    for key in key_list
+        if haskey(hold_reg, key)
+            before_ℓ = fit_regularization_helper!([:reg_model], key, before_ℓ, mws, training_inds, testing_inds, test_factor, reg_min, reg_max; start=hold_reg[key], kwargs...)
+        end
+    end
+end
+
+
 
 """
     fit_regularization!(mws; verbose=true, testing_ratio=0.33, careful_first_step=true, speed_up=false, kwargs...)
 
 Find the best fit model without regularization then fit all of the regularization values in `key_list` for the model in `mws`
 """
-function fit_regularization!(mws::ModelWorkspace; verbose::Bool=true, testing_ratio::Real=0.33, careful_first_step::Bool=true, speed_up::Bool=false, kwargs...)
+function fit_regularization!(mws::ModelWorkspace; verbose::Bool=true, testing_ratio::Real=0.33, careful_first_step::Bool=true, speed_up::Bool=false,
+                             fit_reg_model::Bool=true, kwargs...)
 	# if mws.om.metadata[:todo][:reg_improved]
     n_obs = size(mws.d.flux, 2)
     train_OrderModel!(mws; verbose=verbose, ignore_regularization=true, careful_first_step=careful_first_step, speed_up=speed_up)
@@ -237,6 +267,9 @@ function fit_regularization!(mws::ModelWorkspace; verbose::Bool=true, testing_ra
     test_start_ind = max(1, Int(round(rand() * (n_obs - n_obs_test))))
     testing_inds = test_start_ind:test_start_ind+n_obs_test-1
     fit_regularization!(mws, testing_inds; kwargs...)
+    if mws.om.metadata[:tel_prior] && fit_reg_model
+        fit_regularization_model!(mws, testing_inds; kwargs...)
+    end
     mws.om.metadata[:todo][:reg_improved] = true
 	# end
 end
