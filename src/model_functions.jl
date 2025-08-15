@@ -1350,9 +1350,6 @@ function model_s_prior(s, reg::Dict)
 	return 0
 end
 
-
-## TEMPORARY - TODO: INTEGRATE FUNCTIONS INTO SSOF
-include("/home/kment/RV/telluricfunc.jl")
 """
 	tel_prior(om)
 

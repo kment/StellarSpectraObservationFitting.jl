@@ -711,15 +711,15 @@ function train_OrderModel!(mws::AdamWorkspace; ignore_regularization::Bool=false
 	function cb(as::AdamState)
 
 		# optionally shift the score means to be near 0
-		# DEBUG this has been turned off to test simulated telluric models
-		#if shift_scores
-		#	if !(typeof(mws) <: FrozenTelWorkspace)
-		#		remove_lm_score_means!(mws.om.tel.lm; prop=0.2)
-		#	end
-		#	if typeof(mws.om) <: OrderModelWobble
-		#		remove_lm_score_means!(mws.om.star.lm; prop=0.2)
-		#	end
-		#end
+		# KM: ignore this setting if telluric priors are used
+		if shift_scores && !om.metadata[:tel_prior]
+			if !(typeof(mws) <: FrozenTelWorkspace)
+				remove_lm_score_means!(mws.om.tel.lm; prop=0.2)
+			end
+			if typeof(mws.om) <: OrderModelWobble
+				remove_lm_score_means!(mws.om.star.lm; prop=0.2)
+			end
+		end
 
 		# optionally make the templates always positive
 		if μ_positive
@@ -1216,12 +1216,14 @@ Defaults to returning the AIC-minimum model
 - `use_tel_prior::Bool=false`: Whether to use a modeled prior on telluric feature vectors
 - `careful_first_step::Bool=true`: Whether to shrink the learning rates until the loss improves on the first iteration
 - `speed_up::Bool=false`: Whether to inflate the learning rates until the loss is no longer improving throughout the optimization
+- `max_iter::Int=50`: Maximum number of iterations for initial model optimization
 - `log_λ_gp_star::Real=1/SOAP_gp_params.λ`: The log λ lengthscale of the stellar regularization GP
 - `log_λ_gp_tel::Real=1/LSF_gp_params.λ`: The log λ lengthscale of the telluric regularization GP
 - `reg_star::Union{Nothing,Dict{Symbol,Float64}}=nothing`: Override default_reg_star if given
 - `reg_tel::Union{Nothing,Dict{Symbol,Float64}}=nothing`: Override default_reg_tel if given
 - `reg_model::Union{Nothing,Dict{Symbol,Float64}}=nothing`: Override default_reg_model if given
 - `fixed_vectors::Dict=Dict()`: Fix any stellar or telluric vectors. Must contain 'log_λ'
+- `ignore_μ_tel::Bool=false`: Set the telluric mean to 1 if use_tel_prior
 - `kwargs...`: kwargs passed to `OrderModel` constructor
 """
 function calculate_initial_model(data::Data;
@@ -1229,10 +1231,11 @@ function calculate_initial_model(data::Data;
 	μ_min::Real=0, μ_max::Real=Inf, use_mean::Bool=true, stop_early::Bool=false,
 	remove_reciprocal_continuum::Bool=false, return_full_path::Bool=false,
 	max_n_tel::Int=5, max_n_star::Int=5, use_all_comps::Bool=false, use_tel_prior::Bool=false,
-	careful_first_step::Bool=true, speed_up::Bool=false, 
+	careful_first_step::Bool=true, speed_up::Bool=false, max_iter::Int=50,
 	log_λ_gp_star::Real=1/SOAP_gp_params.λ, log_λ_gp_tel::Real=1/LSF_gp_params.λ, 
 	reg_star::Union{Nothing,Dict{Symbol,Float64}}=nothing, reg_tel::Union{Nothing,Dict{Symbol,Float64}}=nothing,
-	reg_model::Union{Nothing,Dict{Symbol,Float64}}=nothing, fixed_vectors::Dict=Dict(), kwargs...)
+	reg_model::Union{Nothing,Dict{Symbol,Float64}}=nothing, fixed_vectors::Dict=Dict(),
+	ignore_μ_tel::Bool=false, kwargs...)
 	# TODO: Make this work for OrderModelDPCA
 
 	# Get non-LSF version of `data`
@@ -1387,10 +1390,10 @@ function calculate_initial_model(data::Data;
 
 		try
 			if only_s
-				finalize_scores!(mws; iter=50)
+				finalize_scores!(mws; iter=max_iter)
 			else
 				# improve the model
-				improve_initial_model!(mws; careful_first_step=careful_first_step, speed_up=speed_up, iter=50)
+				improve_initial_model!(mws; careful_first_step=careful_first_step, speed_up=speed_up, iter=max_iter)
 
 				# if there is an LSF, do some more fitting
 				if mws.d != data
@@ -1549,7 +1552,9 @@ function calculate_initial_model(data::Data;
 		i = comp2ind(n_tel_next, n_star_cur)
 		oms[i...] = downsize(om, n_tel_next, n_star_cur)
 
-		if use_tel_prior_μ
+		if ignore_μ_tel
+			oms[i...].tel.lm.μ[:] .= 1
+		elseif use_tel_prior_μ
 			oms[i...].tel.lm.μ[:] = get_telluric_prior_spectrum(oms[i...].tel.λ)
 		else
 			make_telluric_template!(oms[i...])

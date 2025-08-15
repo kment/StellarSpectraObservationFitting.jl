@@ -39,7 +39,6 @@ function fit_regularization_helper!(reg_fields::Vector{Symbol}, reg_key::Symbol,
     # only do anything if 
     if haskey(getfield(mws.om, reg_fields[1]), reg_key)
 
-        println("Regularization of $reg_key in $(reg_fields[1])")   # DEBUG
         om = mws.om
         @assert 0 < reg_min < reg_max < Inf
         ℓs = Array{Float64}(undef, 2)
@@ -165,6 +164,7 @@ end
 
 
 _key_list = [:GP_μ, :L2_μ, :L1_μ, :L1_μ₊_factor, :GP_M, :L2_M, :L1_M, :shared_M]
+_key_list_μ = [:GP_μ, :L2_μ, :L1_μ, :L1_μ₊_factor]
 _key_list_fit = [:GP_μ, :L2_μ, :L1_μ, :GP_M, :L2_M, :L1_M]
 _key_list_bases = [:GP_M, :L2_M, :L1_M, :shared_M]
 _key_list_model = [:GP_μ, :L2_μ, :L1_μ, :L2_h2o, :L1_h2o, :L2_oxy, :L1_oxy]
@@ -192,18 +192,27 @@ max_reg_model = 1e12
 
 Fit all of the regularization values in `key_list` for the model in `mws`
 """
-function fit_regularization!(mws::ModelWorkspace, testing_inds::AbstractVecOrMat; key_list::Vector{Symbol}=_key_list_fit, share_regs::Bool=false, kwargs...)
+function fit_regularization!(mws::ModelWorkspace, testing_inds::AbstractVecOrMat; key_list::Vector{Symbol}=_key_list_fit, share_regs::Bool=false, ignore_μ_tel::Bool=false, kwargs...)
     om = mws.om
     n_obs = size(mws.d.flux, 2)
     training_inds = [i for i in 1:n_obs if !(i in testing_inds)]
     check_for_valid_regularization(om.reg_tel)
     check_for_valid_regularization(om.reg_star)
     if share_regs; @assert keys(om.reg_tel) == keys(om.reg_star) end
+    if share_regs; @assert !ignore_μ_tel end
     hold_tel = copy(default_reg_star_full)
     hold_star = copy(default_reg_tel_full)
+    initial_tel = copy(om.reg_tel)
     copy_dict!(hold_tel, om.reg_tel)
     copy_dict!(hold_star, om.reg_star)
     zero_regularization(om)
+    if ignore_μ_tel
+        for key in _key_list_μ
+            if key in keys(initial_tel)
+                om.reg_tel[key] = initial_tel[key]
+            end
+        end
+    end
     println("starting regularization searches")
     before_ℓ = _eval_regularization(copy(mws.om), mws, training_inds, testing_inds)
     println("initial training χ²: $before_ℓ")
@@ -219,7 +228,7 @@ function fit_regularization!(mws::ModelWorkspace, testing_inds::AbstractVecOrMat
             if (!(key in _key_list_bases)) || is_time_variable(om.star)
                 before_ℓ = fit_regularization_helper!([:reg_star], key, before_ℓ, mws, training_inds, testing_inds, test_factor, reg_min, reg_max; start=hold_star[key], kwargs...)
             end
-            if (!(key in _key_list_bases)) || is_time_variable(om.tel)
+            if ((!(key in _key_list_bases)) || is_time_variable(om.tel)) && !((key in _key_list_μ) && ignore_μ_tel)
                 before_ℓ = fit_regularization_helper!([:reg_tel], key, before_ℓ, mws, training_inds, testing_inds, test_factor, reg_min, reg_max; start=hold_tel[key], kwargs...)
             end
         end
