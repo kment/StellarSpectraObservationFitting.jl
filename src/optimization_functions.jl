@@ -712,7 +712,7 @@ function train_OrderModel!(mws::AdamWorkspace; ignore_regularization::Bool=false
 
 		# optionally shift the score means to be near 0
 		# KM: ignore this setting if telluric priors are used
-		if shift_scores && !om.metadata[:tel_prior]
+		if shift_scores && !mws.om.metadata[:tel_prior]
 			if !(typeof(mws) <: FrozenTelWorkspace)
 				remove_lm_score_means!(mws.om.tel.lm; prop=0.2)
 			end
